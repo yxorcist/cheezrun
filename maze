@@ -217,13 +217,17 @@ def choose_challenge(grid: list[int], width: int, height: int,
         facing = rng.randrange(4)
         search = command_distances(grid, width, mouse, facing)
         distances, _ = search
+        # Score a small selection near the target length; avoid simulating
+        # every possible goal on large boards (important on Termux).
+        goals = []
         for cheese in range(len(grid)):
             if cheese == mouse:
                 continue
             steps = min(distances[4 * cheese:4 * cheese + 4])
-            if steps <= 0 or steps > MAX_COMMANDS:
-                continue
-            # Evaluate exact button path: rotations and intersections matter.
+            if 1 <= steps <= MAX_COMMANDS:
+                goals.append((abs(steps - target) + 1.5 * rng.random(), cheese, steps))
+        goals.sort()
+        for _, cheese, steps in goals[:16]:
             commands = program_to(grid, width, mouse, facing, cheese, search)
             position = mouse
             direction = facing
