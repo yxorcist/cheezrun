@@ -20,7 +20,7 @@ class MazeTests(unittest.TestCase):
             w, h = max(width, height), min(width, height)
             for seed in range(12):
                 with self.subTest(w=w, h=h, seed=seed):
-                    grid, mouse, cheese = maze.generate(width, height, random.Random(seed))
+                    grid, mouse, cheese, facing = maze.generate(width, height, random.Random(seed))
                     self.assertEqual(len(grid), w * h)
                     self.assertNotEqual(mouse, cheese)
                     distances, previous = maze.distances(grid, w, h, mouse)
@@ -45,6 +45,7 @@ class MazeTests(unittest.TestCase):
                     self.assertTrue(all(len(line) == 4 * w + 1 for line in lines))
                     self.assertEqual(output.count('M'), 1)
                     self.assertEqual(output.count('C'), 1)
+                    self.assertIn('M' + maze.HEADING_LABELS[facing], output)
                     self.assertTrue(lines[0].startswith('┌') and lines[0].endswith('┐'))
                     self.assertTrue(lines[-1].startswith('└') and lines[-1].endswith('┘'))
                     self.assertNotIn('+', output)
@@ -55,7 +56,7 @@ class MazeTests(unittest.TestCase):
         for width, height in [(2, 2), (6, 9), (12, 5), (40, 3)]:
             w, h = max(width, height), min(width, height)
             for seed in range(8):
-                grid, _, _ = maze.generate(w, h, random.Random(seed))
+                grid, _, _, _ = maze.generate(w, h, random.Random(seed))
                 target_h, target_v = maze.wall_edges(grid, w, h)
                 found_h = [[False] * w for _ in range(h + 1)]
                 found_v = [[False] * (w + 1) for _ in range(h)]
@@ -74,7 +75,7 @@ class MazeTests(unittest.TestCase):
 
     def test_color_keeps_same_geometry(self):
         w, h = 9, 6
-        grid, mouse, cheese = maze.generate(w, h, random.Random(9))
+        grid, mouse, cheese, facing = maze.generate(w, h, random.Random(9))
         plain = maze.render(grid, w, h, mouse, cheese, color=False)
         colored = maze.render(grid, w, h, mouse, cheese, color=True)
         self.assertIn('\x1b[96m', colored)
@@ -93,8 +94,53 @@ class MazeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     maze.generate(width, height, random.Random(0))
 
+    def test_robot_program_is_valid_and_at_most_40_buttons(self):
+        for w, h in [(2, 2), (3, 7), (6, 9), (9, 6), (12, 12), (20, 7), (40, 40)]:
+            seeds = range(3) if w * h > 500 else range(12)
+            for seed in seeds:
+                with self.subTest(w=w, h=h, seed=seed):
+                    width = max(w, h)
+                    grid, mouse, cheese, facing = maze.generate(w, h, random.Random(seed))
+                    commands = maze.program_to(grid, width, mouse, facing, cheese)
+                    self.assertLessEqual(len(commands), maze.MAX_COMMANDS)
+                    self.assertGreater(len(commands), 0)
+                    self.assertTrue(set(commands) <= {'F', 'B', 'L', 'R'})
+                    final_cell, _ = maze.execute(grid, width, mouse, facing, commands)
+                    self.assertEqual(final_cell, cheese)
+                    distances, _ = maze.command_distances(grid, width, mouse, facing)
+                    self.assertEqual(len(commands), min(distances[cheese * 4: cheese * 4 + 4]))
+
+    def test_backward_and_rotation_commands_are_real_buttons(self):
+        grid = [maze.E, maze.W]
+        # Mouse at left, facing west: B is one command to reach right.
+        self.assertEqual(maze.program_to(grid, 2, 0, 3, 1), ['B'])
+        self.assertEqual(maze.execute(grid, 2, 0, 3, ['B']), (1, 3))
+        self.assertEqual(maze.execute(grid, 2, 0, 0, ['R', 'F']), (1, 1))
+        with self.assertRaises(ValueError):
+            maze.execute(grid, 2, 0, 0, ['F'])
+
+    def test_cli_minimal_and_seeded_solution(self):
+        import io
+        import contextlib
+        for args in (['6', '9', '1234'], ['9', '6', '1234']):
+            with contextlib.redirect_stdout(io.StringIO()) as stream:
+                result = maze.main(args)
+            self.assertEqual(result, 0)
+            lines = stream.getvalue().splitlines()
+            self.assertEqual(len(lines), 13)
+            self.assertTrue(all(len(line) == 37 for line in lines))
+            if args[0] == '6':
+                first = stream.getvalue()
+            else:
+                self.assertEqual(first, stream.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as stream:
+            result = maze.main(['6', '9', '1234', 'solve'])
+        self.assertEqual(result, 0)
+        self.assertIn('Program (', stream.getvalue())
+        self.assertIn('F=forward', stream.getvalue())
+
     def test_display_contains_no_open_perimeter(self):
-        grid, mouse, cheese = maze.generate(9, 6, random.Random(5))
+        grid, mouse, cheese, facing = maze.generate(9, 6, random.Random(5))
         lines = maze.render(grid, 9, 6, mouse, cheese).splitlines()
         self.assertTrue(all(line.startswith('│') and line.endswith('│') for line in lines[1::2]))
 
