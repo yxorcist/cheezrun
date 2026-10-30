@@ -8,11 +8,13 @@ One command generates a random maze for our little robot mice at ARTS.
 maze 6 9
 ```
 
-That's it. No menus, no dependencies, no unnecessary features.
+That's it. No menus, no dependencies, no unnecessary features. The result uses UTF-8 box drawing, which works in Termux. Colors are automatic in terminals; use `NO_COLOR=1 maze 6 9` to switch them off.
 
 - `6 9` and `9 6` both give a **9-wide x 6-high** maze.
 - `M` is the mouse. `C` is the cheese.
 - Fully enclosed. Always solvable.
+- Cyan walls, green mouse, yellow cheese in an interactive terminal.
+- No pillar pieces. Every physical wall can be made from length-1 or length-2 edges; continuous runs are split into those pieces. The box-drawing junctions are just visual connections, not additional components.
 - Avoids very long straight corridors and internal walls when possible.
 - Every run generates a different maze.
 
