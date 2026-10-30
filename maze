@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Generate a closed mouse-to-cheese maze. Stdlib only."""
+
+from __future__ import annotations
+
+import random
+import sys
+from collections import deque
+
+N, E, S, W = 1, 2, 4, 8
+DIRECTIONS = ((0, -1, N, S), (1, 0, E, W), (0, 1, S, N), (-1, 0, W, E))
+
+
+def neighbors(cell: int, width: int, height: int):
+    x, y = cell % width, cell // width
+    for dx, dy, direction, reverse in DIRECTIONS:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < width and 0 <= ny < height:
+            yield ny * width + nx, direction, reverse
+
+
+def connect(grid: list[int], a: int, b: int, direction: int, reverse: int):
+    grid[a] |= direction
+    grid[b] |= reverse
+
+
+def carve(width: int, height: int, rng: random.Random) -> list[int]:
+    """Randomized Prim, then a few extra openings to allow alternate routes."""
+    cells = width * height
+    grid = [0] * cells
+    visited = [False] * cells
+    first = rng.randrange(cells)
+    visited[first] = True
+    frontier = [(first, *edge) for edge in neighbors(first, width, height)]
+
+    while frontier:
+        i = rng.randrange(len(frontier))
+        a, b, direction, reverse = frontier[i]
+        frontier[i] = frontier[-1]
+        frontier.pop()
+        if visited[b]:
+            continue
+        connect(grid, a, b, direction, reverse)
+        visited[b] = True
+        frontier.extend((b, *edge) for edge in neighbors(b, width, height) if not visited[edge[0]])
+
+    # Remove a small number of interior walls for loops and extra choices.
+    closed = [
+        (a, b, direction, reverse)
+        for a in range(cells)
+        for b, direction, reverse in neighbors(a, width, height)
+        if b > a and not grid[a] & direction
+    ]
+    rng.shuffle(closed)
+    extra = max(0, round(len(closed) * 0.10))
+    for a, b, direction, reverse in closed[:extra]:
+        # Avoid opening up an entire 2x2 area too often.
+        if grid[a].bit_count() == 4 or grid[b].bit_count() == 4:
+            continue
+        connect(grid, a, b, direction, reverse)
+    return grid
+
+
+def distances(grid: list[int], width: int, height: int, start: int):
+    distance = [-1] * len(grid)
+    previous = [-1] * len(grid)
+    distance[start] = 0
+    queue = deque((start,))
+    while queue:
+        a = queue.popleft()
+        for b, direction, _ in neighbors(a, width, height):
+            if grid[a] & direction and distance[b] == -1:
+                distance[b] = distance[a] + 1
+                previous[b] = a
+                queue.append(b)
+    return distance, previous
+
+
+def route(previous: list[int], start: int, goal: int) -> list[int]:
+    result = [goal]
+    while result[-1] != start:
+        parent = previous[result[-1]]
+        if parent == -1:
+            raise ValueError('Unreachable cheese')
+        result.append(parent)
+    return result[::-1]
+
+
+def turns(path: list[int], width: int) -> int:
+    deltas = [b - a for a, b in zip(path, path[1:])]
+    return sum(a != b for a, b in zip(deltas, deltas[1:]))
+
+
+def endpoints(grid: list[int], width: int, height: int, rng: random.Random):
+    """Place mouse and cheese far apart, favoring routes with turns."""
+    start = rng.randrange(len(grid))
+    ds, _ = distances(grid, width, height, start)
+    far = max(ds)
+    pool = [i for i, d in enumerate(ds) if d >= max(1, far - 2)]
+    mouse = rng.choice(pool)
+    ds, previous = distances(grid, width, height, mouse)
+    far = max(ds)
+    pool = [i for i, d in enumerate(ds) if d >= max(1, far - 3)]
+    cheese = max(pool, key=lambda i: ds[i] + 1.7 * turns(route(previous, mouse, i), width) + rng.random() * 2)
+    return mouse, cheese, route(previous, mouse, cheese)
+
+
+def streak_penalty(flags: list[bool], tolerated: int = 3) -> int:
+    penalty = 0
+    run = 0
+    for blocked in [*flags, False]:
+        if blocked:
+            run += 1
+        else:
+            penalty += max(0, run - tolerated) ** 2
+            run = 0
+    return penalty
+
+
+def wall_penalty(grid: list[int], width: int, height: int) -> int:
+    """Ignore outer perimeter, which necessarily has long unbroken walls."""
+    penalty = 0
+    for y in range(1, height):
+        penalty += streak_penalty([not grid[(y - 1) * width + x] & S for x in range(width)])
+    for x in range(1, width):
+        penalty += streak_penalty([not grid[y * width + x - 1] & E for y in range(height)])
+    return penalty
+
+
+def corridor_penalty(grid: list[int], width: int, height: int) -> int:
+    """Penalize lengthy straight stretches without branching opportunities."""
+    penalty = 0
+    for y in range(height):
+        penalty += streak_penalty([grid[y * width + x] == E | W for x in range(width)], 2)
+    for x in range(width):
+        penalty += streak_penalty([grid[y * width + x] == N | S for y in range(height)], 2)
+    return penalty
+
+
+def generate(width: int, height: int, rng: random.Random | None = None):
+    """Return walls (passage bits), mouse position, and cheese position."""
+    if width < height:
+        width, height = height, width
+    if not (2 <= height <= width <= 40):
+        raise ValueError('Each dimension must be between 2 and 40')
+    if rng is None:
+        rng = random.Random()
+
+    attempts = 36 if width * height <= 300 else 16
+    best = None
+    best_score = float('-inf')
+    for _ in range(attempts):
+        grid = carve(width, height, rng)
+        mouse, cheese, path = endpoints(grid, width, height, rng)
+        branches = sum(cell.bit_count() >= 3 for cell in grid)
+        dead_ends = sum(cell.bit_count() == 1 for cell in grid)
+        score = (
+            0.9 * (len(path) - 1)
+            + 1.7 * turns(path, width)
+            + 0.5 * branches
+            + 0.15 * dead_ends
+            - 6.0 * wall_penalty(grid, width, height)
+            - 6.0 * corridor_penalty(grid, width, height)
+            + rng.random() * 2
+        )
+        if score > best_score:
+            best = (grid, mouse, cheese)
+            best_score = score
+    return best
+
+
+def render(grid: list[int], width: int, height: int, mouse: int, cheese: int) -> str:
+    output = ['+' + '---+' * width]
+    for y in range(height):
+        middle = '|'
+        bottom = '+'
+        for x in range(width):
+            cell = y * width + x
+            marker = 'M' if cell == mouse else 'C' if cell == cheese else ' '
+            middle += f' {marker} ' + (' ' if grid[cell] & E else '|')
+            bottom += ('   ' if grid[cell] & S else '---') + '+'
+        output.extend((middle, bottom))
+    return '\n'.join(output)
+
+
+def main(args: list[str] | None = None) -> int:
+    args = sys.argv[1:] if args is None else args
+    if len(args) != 2:
+        print('Usage: maze WIDTH HEIGHT    Example: maze 6 9', file=sys.stderr)
+        return 2
+    try:
+        a, b = map(int, args)
+        width, height = max(a, b), min(a, b)
+        grid, mouse, cheese = generate(width, height)
+    except ValueError as exc:
+        print(f'maze: {exc}', file=sys.stderr)
+        return 2
+    print(render(grid, width, height, mouse, cheese))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
