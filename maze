@@ -138,35 +138,147 @@ def corridor_penalty(grid: list[int], width: int, height: int) -> int:
     return penalty
 
 
+# The robot travels one cell per F/B press and turns in place with L/R.
+# Clockwise headings: north, east, south, west.
+HEADINGS = (N, E, S, W)
+HEADING_LABELS = ('↑', '→', '↓', '←')
+MAX_COMMANDS = 40
+
+
+def transitions(grid: list[int], width: int, cell: int, heading: int):
+    """Legal button presses from one (cell, facing) state."""
+    yield 'L', cell, (heading - 1) % 4
+    yield 'R', cell, (heading + 1) % 4
+    for action, direction in (('F', heading), ('B', (heading + 2) % 4)):
+        if not grid[cell] & HEADINGS[direction]:
+            continue
+        step = (-width, 1, width, -1)[direction]
+        yield action, cell + step, heading
+
+
+def command_distances(grid: list[int], width: int, start: int, facing: int):
+    """BFS over (position, orientation), not just cells."""
+    distances = [-1] * (4 * len(grid))
+    previous = [None] * (4 * len(grid))
+    origin = 4 * start + facing
+    distances[origin] = 0
+    queue = deque((origin,))
+    while queue:
+        state = queue.popleft()
+        cell, heading = divmod(state, 4)
+        for action, next_cell, next_heading in transitions(grid, width, cell, heading):
+            nxt = next_cell * 4 + next_heading
+            if distances[nxt] >= 0:
+                continue
+            distances[nxt] = distances[state] + 1
+            previous[nxt] = (state, action)
+            queue.append(nxt)
+    return distances, previous
+
+
+def program_to(grid: list[int], width: int, start: int, facing: int,
+               goal: int, search=None) -> list[str]:
+    """Shortest physical button sequence; goal orientation is unrestricted."""
+    distances, previous = (command_distances(grid, width, start, facing)
+                           if search is None else search)
+    destinations = [goal * 4 + direction for direction in range(4)]
+    end = min(destinations, key=lambda state: distances[state] if distances[state] >= 0 else float('inf'))
+    if distances[end] < 0:
+        raise ValueError('Cheese unreachable')
+    instructions = []
+    while previous[end] is not None:
+        end, action = previous[end]
+        instructions.append(action)
+    return instructions[::-1]
+
+
+def execute(grid: list[int], width: int, start: int,
+            facing: int, commands: list[str]):
+    """Follow commands; raise if any instruction drives into a wall."""
+    cell, direction = start, facing
+    for action in commands:
+        legal = {name: (new_cell, new_heading)
+                 for name, new_cell, new_heading in transitions(grid, width, cell, direction)}
+        if action not in legal:
+            raise ValueError(f'Blocked or invalid instruction: {action}')
+        cell, direction = legal[action]
+    return cell, direction
+
+
+def choose_challenge(grid: list[int], width: int, height: int,
+                     rng: random.Random):
+    """Pick a challenging mouse position, facing, and cheese within 40 presses."""
+    target = min(30, max(4, round(0.46 * width * height)))
+    best = None
+    best_score = float('-inf')
+    # Consider several launch positions; choose the most interesting solvable task.
+    for _ in range(3):
+        mouse = rng.randrange(len(grid))
+        facing = rng.randrange(4)
+        search = command_distances(grid, width, mouse, facing)
+        distances, _ = search
+        for cheese in range(len(grid)):
+            if cheese == mouse:
+                continue
+            steps = min(distances[4 * cheese:4 * cheese + 4])
+            if steps <= 0 or steps > MAX_COMMANDS:
+                continue
+            # Evaluate exact button path: rotations and intersections matter.
+            commands = program_to(grid, width, mouse, facing, cheese, search)
+            position = mouse
+            direction = facing
+            junctions = 0
+            turns = 0
+            for command in commands:
+                if command in ('L', 'R'):
+                    turns += 1
+                else:
+                    junctions += grid[position].bit_count() >= 3
+                position, direction = execute(grid, width, position, direction, [command])
+            score = (
+                -2.2 * abs(steps - target)
+                + 1.1 * turns
+                + 1.3 * junctions
+                + 0.1 * steps
+                + rng.random() * 2
+            )
+            if score > best_score:
+                best_score = score
+                best = (mouse, cheese, facing, commands)
+    return best, best_score
+
+
 def generate(width: int, height: int, rng: random.Random | None = None):
-    """Return walls (passage bits), mouse position, and cheese position."""
-    if width < height:
-        width, height = height, width
+    """Return (passage bits, mouse position, cheese position, initial heading)."""
+    width, height = max(width, height), min(width, height)
     if not (2 <= height <= width <= 40):
         raise ValueError('Each dimension must be between 2 and 40')
     if rng is None:
         rng = random.Random()
 
-    attempts = 36 if width * height <= 300 else 16
+    attempts = 24 if width * height <= 300 else 10
     best = None
     best_score = float('-inf')
     for _ in range(attempts):
         grid = carve(width, height, rng)
-        mouse, cheese, path = endpoints(grid, width, height, rng)
+        challenge, challenge_score = choose_challenge(grid, width, height, rng)
+        if challenge is None:
+            continue
+        mouse, cheese, facing, commands = challenge
         branches = sum(cell.bit_count() >= 3 for cell in grid)
         dead_ends = sum(cell.bit_count() == 1 for cell in grid)
         score = (
-            0.9 * (len(path) - 1)
-            + 1.7 * turns(path, width)
-            + 0.5 * branches
-            + 0.15 * dead_ends
-            - 6.0 * wall_penalty(grid, width, height)
-            - 6.0 * corridor_penalty(grid, width, height)
-            + rng.random() * 2
+            challenge_score
+            + 0.12 * branches
+            + 0.06 * dead_ends
+            - 3.0 * wall_penalty(grid, width, height)
+            - 4.0 * corridor_penalty(grid, width, height)
         )
         if score > best_score:
-            best = (grid, mouse, cheese)
+            best = (grid, mouse, cheese, facing)
             best_score = score
+    if best is None:
+        raise RuntimeError('Unable to generate a solvable robot challenge')
     return best
 
 
@@ -226,7 +338,8 @@ def wall_pieces(grid: list[int], width: int, height: int):
 
 
 def render(grid: list[int], width: int, height: int,
-           mouse: int, cheese: int, color: bool | None = None) -> str:
+           mouse: int, cheese: int, color: bool | None = None,
+           facing: int = 0) -> str:
     """Draw real wall edges, with no standalone '+' pillar markers.
 
     Uses UTF-8 box-drawing glyphs, supported by Termux and Linux terminals.
@@ -263,12 +376,12 @@ def render(grid: list[int], width: int, height: int,
         for x in range(width):
             cell = y * width + x
             if cell == mouse:
-                marker = paint('M', 92)
+                marker = paint('M' + HEADING_LABELS[facing], 92)
             elif cell == cheese:
-                marker = paint('C', 93)
+                marker = paint('C ', 93)
             else:
-                marker = ' '
-            middle.append(' ' + marker + ' ')
+                marker = '  '
+            middle.append(' ' + marker)
             middle.append(paint('│', 96) if vertical[y][x + 1] else ' ')
         output.append(''.join(middle))
     return '\n'.join(output)
@@ -276,17 +389,34 @@ def render(grid: list[int], width: int, height: int,
 
 def main(args: list[str] | None = None) -> int:
     args = sys.argv[1:] if args is None else args
-    if len(args) != 2:
-        print('Usage: maze WIDTH HEIGHT    Example: maze 6 9', file=sys.stderr)
+    usage = 'Usage: maze WIDTH HEIGHT [SEED] [solve]'
+    if not 2 <= len(args) <= 4:
+        print(usage, file=sys.stderr)
         return 2
     try:
-        a, b = map(int, args)
+        a, b = map(int, args[:2])
         width, height = max(a, b), min(a, b)
-        grid, mouse, cheese = generate(width, height)
-    except ValueError as exc:
+        seed = None
+        show_solution = False
+        for arg in args[2:]:
+            if arg == 'solve' and not show_solution:
+                show_solution = True
+            elif seed is None:
+                seed = int(arg)
+            else:
+                raise ValueError('Invalid arguments')
+        rng = random.Random(seed)
+        grid, mouse, cheese, facing = generate(width, height, rng)
+    except (ValueError, RuntimeError) as exc:
         print(f'maze: {exc}', file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
-    print(render(grid, width, height, mouse, cheese))
+
+    print(render(grid, width, height, mouse, cheese, facing=facing))
+    if show_solution:
+        commands = program_to(grid, width, mouse, facing, cheese)
+        print(f'\nProgram ({len(commands)}/{MAX_COMMANDS}): ' + ' '.join(commands))
+        print('F=forward  B=backward  L=left  R=right')
     return 0
 
 
