@@ -39,7 +39,7 @@ class MazeTests(unittest.TestCase):
                             self.assertFalse(grid[a] & maze.N)
                         if y == h - 1:
                             self.assertFalse(grid[a] & maze.S)
-                    output = maze.render(grid, w, h, mouse, cheese)
+                    output = maze.render(grid, w, h, mouse, cheese, facing=facing)
                     lines = output.splitlines()
                     self.assertEqual(len(lines), 2 * h + 1)
                     self.assertTrue(all(len(line) == 4 * w + 1 for line in lines))
